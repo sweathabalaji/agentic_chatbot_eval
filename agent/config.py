@@ -22,7 +22,7 @@ class AgentConfig:
     MOONSHOT_TEMPERATURE: float = float(os.getenv("MOONSHOT_TEMPERATURE", "0.0"))
     
     # Tavily API Configuration
-    TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "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")
+    TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "put_our_tavily_key_here")
     
     # Request timeouts - Removed for full agentic processing
     API_TIMEOUT: int = int(os.getenv("API_TIMEOUT", "300"))  # 5 minutes for thorough processing  
