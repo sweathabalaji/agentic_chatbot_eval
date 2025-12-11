@@ -81,34 +81,103 @@ class IntentParser:
         
     async def parse_intent_async(self, user_input: str) -> Intent:
         """
-        Complete AI decision making - no keyword patterns
-        Agent determines intent by understanding the actual question
+        AI-enhanced intent classification with semantic understanding
         """
         
-        # Pure AI analysis - no keyword filtering
         logger.info(f"Pure AI intent analysis for: '{user_input}'")
         
-        # Let the agent analyze the semantic meaning
+        user_lower = user_input.lower()
+        
+        # Extract entities first
         entities = Entities(
-            fund_name=self._extract_potential_fund_name(user_input) if self._might_contain_fund_name(user_input) else None
+            fund_name=self._extract_potential_fund_name(user_input) if self._might_contain_fund_name(user_input) else None,
+            metric=self._extract_metric(user_lower),
+            period=self._extract_period(user_lower)
         )
         
-        # Basic sentiment (can be AI-driven later)
-        sentiment = self._analyze_sentiment(user_input.lower())
+        # Analyze sentiment
+        sentiment = self._analyze_sentiment(user_lower)
         
-        # DEFAULT: Let agent decide through its own reasoning
-        # No predetermined routing - agent chooses tools based on understanding
-        intent_type = IntentType.GENERAL_INFO  # Neutral starting point
-        confidence = 0.7  # Agent will adjust based on its analysis
+        # Intelligent intent classification with semantic patterns
+        intent_result = self._classify_intent(user_lower, entities)
         
         return Intent(
-            intent=intent_type,
-            confidence=confidence,
+            intent=intent_result['intent'],
+            confidence=intent_result['confidence'],
             entities=entities,
             sentiment=sentiment,
-            clarity="medium",  # Agent will determine clarity
-            suggested_action="AGENT_DECIDE"  # Pure agent decision making
+            clarity=intent_result['clarity'],
+            suggested_action=intent_result['suggested_action']
         )
+    
+    def _classify_intent(self, user_lower: str, entities: Entities) -> Dict[str, Any]:
+        """
+        Intelligent intent classification based on semantic understanding
+        """
+        # Greeting patterns - must be standalone or at start
+        greeting_words = ['hello', 'hi ', ' hi', 'hey ', ' hey', 'good morning', 'good afternoon', 'good evening']
+        is_greeting = any(user_lower.startswith(word) or user_lower.endswith(word) or f' {word.strip()} ' in user_lower for word in greeting_words)
+        is_short = len(user_lower.split()) <= 3
+        
+        if is_greeting and is_short:
+            return {'intent': IntentType.GREETING, 'confidence': 0.95, 'clarity': 'high', 'suggested_action': 'PROCEED'}
+        
+        # NAV specific requests
+        if any(phrase in user_lower for phrase in ['nav', 'net asset value', 'current value', 'latest nav']):
+            return {'intent': IntentType.NAV_REQUEST, 'confidence': 0.9, 'clarity': 'high', 'suggested_action': 'PROCEED'}
+        
+        # Comparison requests
+        if any(word in user_lower for word in ['compare', 'comparison', 'versus', ' vs ', ' vs.', 'difference between']):
+            return {'intent': IntentType.COMPARE_FUNDS, 'confidence': 0.9, 'clarity': 'high', 'suggested_action': 'PROCEED'}
+        
+        # Performance/returns queries
+        if any(phrase in user_lower for phrase in ['performance', 'returns', 'return', 'growth', 'gained', 'top performer', 'best fund', 'highest return', 'top performing']):
+            return {'intent': IntentType.PERFORMANCE_HISTORY, 'confidence': 0.9, 'clarity': 'high', 'suggested_action': 'PROCEED'}
+        
+        # Redemption queries
+        if any(word in user_lower for word in ['redeem', 'redemption', 'withdraw', 'exit', 'sell']):
+            return {'intent': IntentType.REDEMPTION_QUERY, 'confidence': 0.9, 'clarity': 'high', 'suggested_action': 'PROCEED'}
+        
+        # Specific fund queries (has fund name or ISIN or looking for funds)
+        if entities.fund_name or 'isin' in user_lower or any(phrase in user_lower for phrase in ['find fund', 'search fund', 'show fund', 'list fund', 'show me', 'funds with', 'funds in', 'factsheet', 'details about', 'information about', 'tell me about', 'large cap', 'mid cap', 'small cap', '5-star', 'five star', 'star rated']):
+            return {'intent': IntentType.FUND_QUERY, 'confidence': 0.85, 'clarity': 'high', 'suggested_action': 'PROCEED'}
+        
+        # KYC related
+        if any(word in user_lower for word in ['kyc', 'know your customer', 'verification', 'documents', 'identity']):
+            return {'intent': IntentType.KYC_QUERY, 'confidence': 0.9, 'clarity': 'high', 'suggested_action': 'PROCEED'}
+        
+        # Account issues
+        if any(word in user_lower for word in ['account', 'login', 'password', 'access', 'blocked', 'issue', 'problem']):
+            return {'intent': IntentType.ACCOUNT_ISSUE, 'confidence': 0.85, 'clarity': 'high', 'suggested_action': 'PROCEED'}
+        
+        # Small talk
+        if any(phrase in user_lower for phrase in ['how are you', 'what can you do', 'who are you', 'thank you', 'thanks']):
+            return {'intent': IntentType.SMALLTALK, 'confidence': 0.9, 'clarity': 'high', 'suggested_action': 'PROCEED'}
+        
+        # Default to general info with medium confidence
+        return {'intent': IntentType.GENERAL_INFO, 'confidence': 0.7, 'clarity': 'medium', 'suggested_action': 'PROCEED'}
+    
+    def _extract_metric(self, user_lower: str) -> Optional[str]:
+        """Extract performance metric from query"""
+        if 'nav' in user_lower:
+            return 'nav'
+        elif any(word in user_lower for word in ['return', 'returns', 'performance']):
+            return 'returns'
+        elif 'expense' in user_lower or 'ratio' in user_lower:
+            return 'expense_ratio'
+        return None
+    
+    def _extract_period(self, user_lower: str) -> Optional[str]:
+        """Extract time period from query"""
+        if '1 year' in user_lower or '1y' in user_lower or 'one year' in user_lower:
+            return '1y'
+        elif '3 year' in user_lower or '3y' in user_lower or 'three year' in user_lower:
+            return '3y'
+        elif '5 year' in user_lower or '5y' in user_lower or 'five year' in user_lower:
+            return '5y'
+        elif 'this year' in user_lower or 'current year' in user_lower or 'ytd' in user_lower:
+            return '1y'
+        return None
         
     def _might_contain_fund_name(self, user_input: str) -> bool:
         """

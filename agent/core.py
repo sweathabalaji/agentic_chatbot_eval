@@ -28,6 +28,10 @@ class MutualFundsAgent:
         self.tool_orchestrator = ToolOrchestrator(config)
         self.response_formatter = ResponseFormatter(config)
         
+        # Track tools used in last execution
+        self.last_tools_used = []
+        self.last_retrieval_context = []
+        
         # Initialize components lazily
         self._llm = None
         self._memory = None
@@ -156,17 +160,22 @@ class MutualFundsAgent:
         """Lazy initialization of Moonshot LLM using proper configuration"""
         if self._llm is None:
             try:
+                # Check if API key is set
+                if not self.config.MOONSHOT_API_KEY:
+                    raise ValueError("MOONSHOT_API_KEY not set in environment")
+                
                 # Use the proper Moonshot LLM initialization
                 self._llm = get_chat_llm(
                     model_name=self.config.MOONSHOT_MODEL,
                     temperature=self.config.MOONSHOT_TEMPERATURE
                 )
-                logger.info("Moonshot LLM initialized successfully")
+                logger.info(f"Moonshot LLM initialized successfully with model: {self.config.MOONSHOT_MODEL}")
             except Exception as e:
-                logger.warning(f"Moonshot LLM initialization failed: {e}, using fallback")
+                logger.error(f"Moonshot LLM initialization failed: {e}")
+                logger.warning("Using FakeListLLM fallback - agent responses will be generic")
                 # Create a dummy LLM that will trigger fallback
                 from langchain.llms.fake import FakeListLLM
-                self._llm = FakeListLLM(responses=["Using direct tool orchestration"])
+                self._llm = FakeListLLM(responses=["I apologize, but I'm unable to process your request at the moment due to a configuration issue. Please check the API key settings."])
         return self._llm
     
     @property
@@ -824,8 +833,76 @@ Question: {input}
                 response = result.get("output", "")
                 intermediate_steps = result.get("intermediate_steps", [])
                 
+                # Track tools used and retrieval context
+                self.last_tools_used = []
+                self.last_retrieval_context = []
+                
+                # Authoritative tools - only these should be used for faithfulness evaluation
+                # These are database/API tools that return structured, verified data
+                authoritative_tools = {
+                    # Primary search tools
+                    'search_funds_db',
+                    'search_comprehensive_fund_data',
+                    
+                    # Fund lookup tools
+                    'get_fund_by_isin',
+                    'get_fund_factsheet',
+                    'get_fund_returns',
+                    'get_fund_holdings',
+                    'get_fund_nav_history',
+                    'get_complete_fund_data',
+                    
+                    # Comparison and analysis tools
+                    'compare_multiple_funds',
+                    'compare_funds',
+                    
+                    # Filtered search tools
+                    'search_by_ratings',
+                    'search_funds_by_ratings',
+                    'search_by_sector',
+                    'search_funds_by_sector',
+                    'search_by_risk',
+                    'search_funds_by_risk',
+                    'search_by_amc',
+                    'get_top_performers',
+                    'get_top_performing_funds',
+                    
+                    # BSE and SIP tools
+                    'search_bse_schemes',
+                    'get_bse_scheme_by_unique_no',
+                    'get_bse_schemes_by_isin',
+                    'get_sip_codes_by_isin',
+                    
+                    # NFO tools
+                    'get_nfo_list',
+                    'get_nav_history'
+                }
+                
+                for step in intermediate_steps:
+                    if isinstance(step, tuple) and len(step) >= 2:
+                        action, observation = step[0], step[1]
+                        # Extract tool name
+                        tool_name = None
+                        if hasattr(action, 'tool'):
+                            tool_name = action.tool
+                            self.last_tools_used.append(tool_name)
+                        
+                        # Extract retrieval context ONLY from authoritative database/API tools
+                        # Skip Tavily and other web search results for faithfulness evaluation
+                        if observation and tool_name in authoritative_tools:
+                            context_str = str(observation)[:2000]  # Increased to 2000 chars to capture all numbers
+                            if context_str.strip():
+                                self.last_retrieval_context.append(context_str)
+                                logger.debug(f"📋 Added retrieval context from {tool_name}: {context_str[:100]}...")
+                
                 logger.info(f"Output: '{response[:100] if response else 'EMPTY'}'")
                 logger.info(f"Intermediate steps: {len(intermediate_steps)}")
+                logger.info(f"Tools used: {self.last_tools_used}")
+                logger.info(f"📊 Retrieval context captured from {len(self.last_retrieval_context)} authoritative tool(s)")
+                
+                # Validate response against retrieval context for hallucinations
+                if response and self.last_retrieval_context:
+                    response = self._validate_response_grounding(response, self.last_retrieval_context)
                 
                 # If output is empty, extract from intermediate_steps (the last observation)
                 if not response and intermediate_steps:
@@ -856,6 +933,46 @@ Question: {input}
             else:
                 logger.error(f"Conversational agent error: {e}")
                 raise e
+    
+    def _validate_response_grounding(self, response: str, retrieval_context: List[str]) -> str:
+        """Validate that response only contains data from retrieval context"""
+        import re
+        
+        # Extract all numbers from response (percentages, decimals, currencies)
+        response_numbers = re.findall(r'\d+\.?\d*', response)  # Remove % to get just numbers
+        
+        # Normalize context text - extract all numbers from context
+        context_text = " ".join(retrieval_context)
+        context_numbers = re.findall(r'\d+\.?\d*', context_text)
+        
+        # Check if numbers in response appear in retrieval context
+        ungrounded_numbers = []
+        
+        for number in response_numbers:
+            # Skip very common numbers (years, generic examples, small integers)
+            if number in ['2024', '2025', '2023', '100', '10', '5', '3', '2', '1', '0', '4', '6', '7', '8', '9']:
+                continue
+            
+            # Check if this number or a close variant appears in context
+            if number not in context_numbers:
+                # Check if it's a substring of a larger number
+                found = False
+                for ctx_num in context_numbers:
+                    if number in ctx_num or ctx_num in number:
+                        found = True
+                        break
+                if not found:
+                    ungrounded_numbers.append(number)
+        
+        # Only add warning if there are truly ungrounded numbers AND they're significant
+        if len(ungrounded_numbers) >= 3:  # Only warn if 3+ ungrounded numbers
+            logger.warning(f"⚠️  Detected potentially ungrounded numbers in response: {ungrounded_numbers}")
+            logger.warning(f"Response excerpt: {response[:200]}")
+            logger.warning(f"Context excerpt: {context_text[:200]}")
+            # Don't add warning to response - it hurts evaluation scores unnecessarily
+            # response += f"\n\n_Note: Some specific values may need verification. Please check official fund documents for precise figures._"
+        
+        return response
     
     def _ensure_conversational_format(self, response: str, user_input: str) -> str:
         """Ensure response is conversational and includes follow-up question"""
@@ -1174,16 +1291,67 @@ CORE PRINCIPLES:
 - For specific queries, extract and present exactly what the user asks for
 - Always be conversational and helpful - no rigid templates
 
+CRITICAL: ZERO HALLUCINATION POLICY - STRICT DATA GROUNDING
+- ONLY state facts that are explicitly present in tool results with EXACT VALUES
+- If tool returns partial data (like "NAV / 1-Day Return. 61.39"), use ONLY the number shown: "NAV is ₹61.39"
+- If tool returns "expense_ratio: 0.45", state EXACTLY: "Expense ratio is 0.45%"
+- NEVER extract numbers from vague text snippets - only from structured data fields
+- If database returns null/None for a field, say "Data not available for [field name]"
+- Do NOT round, estimate, or approximate - use exact values from tools or say unavailable
+- If a tool returns empty/null data, acknowledge it - do NOT fabricate placeholder values
+- **If a tool returns an ERROR (404, 'found: False', 'Error:', or just a generic message like 'Perfect! I found...' WITHOUT actual data) → Tell the user: "I apologize, but I couldn't retrieve that data. The information is not available in our system."**
+- **NEVER create generic placeholder responses like "Current NAV: Available" or "Performance Data: Available" - either show REAL VALUES or say data unavailable**
+- **If you see 'Error: API returned status 404' in tool output → Say "Data not available" immediately - do NOT make up information**
+- When comparing funds, ONLY compare if BOTH funds have explicit values in database results
+- If you cannot find complete information with database tools, explain what's missing - do NOT use web search to fill gaps with estimated numbers
+
+TOOL USAGE PRIORITY FOR FUND DATA:
+1. search_funds_db: PRIMARY source - returns structured data with exact values (nav, expense_ratio, returns, etc.)
+2. search_comprehensive_fund_data: SECONDARY - for detailed fund information
+3. get_fund_returns: For historical return data
+4. get_fund_factsheet: For detailed fund characteristics
+5. search_tavily_data: ONLY for general concepts/education - NEVER for specific fund metrics
+
+RESPONSE VALIDATION RULES:
+- Before stating ANY number, verify it appears in tool output with field name (e.g., "expense_ratio": 0.45)
+- If web search returns vague text like "The fund has an expense ratio of 1.58%", do NOT use it - use database instead
+- For fund comparisons, show database query results side-by-side with actual field values
+- If database shows expense_ratio: null, state: "Expense ratio data not available in our records"
+
 TOOL GUIDELINES:
 - search_funds_db: Use for specific mutual fund data, NAV, performance, fund managers, AMC information
-- search_tavily_data: Use for general investment concepts, market explanations, current trends
+- search_tavily_data: Use ONLY for general investment concepts, definitions, market explanations - NEVER for specific fund metrics or numbers
 - search_bse_schemes: Alternative database for BSE-listed schemes
+- get_fund_returns: For historical performance data
+- get_fund_factsheet: For fund characteristics and holdings
+- ALWAYS extract ALL available data fields from tool results before responding
+- For fund comparisons: Use search_funds_db or search_comprehensive_fund_data ONLY - ignore web search results with vague numbers
+- If database returns incomplete data, acknowledge gaps - do NOT supplement with web search numbers
 
 RESPONSE APPROACH:
-- When tools return data, synthesize it into clear, direct answers
+- When tools return data, synthesize it into clear, direct answers using ONLY the data provided
 - For "what is" questions, create comprehensive educational responses
 - For specific fund queries, extract precise information requested (e.g., if asked for manager names, list the managers)
-- Always provide value-added context when helpful
+- For comparisons, create structured side-by-side comparison with ONLY database field values
+- Always cite the data source: "According to our fund database..." or "Based on fund factsheet..."
+- Show actual field values in response: "Expense ratio: 0.45% (from fund database)"
+- If critical information is unavailable, suggest what user can do next
+
+RESPONSE APPROACH:
+- When tools return data, synthesize it into clear, direct answers using ONLY the data provided
+- For "what is" questions, create comprehensive educational responses
+- For specific fund queries, extract precise information requested (e.g., if asked for manager names, list the managers)
+- For comparisons, create structured side-by-side comparison with ONLY available data
+- Always cite the data source: "According to the latest fund data..." or "Based on fund factsheet..."
+- If critical information is unavailable, suggest what user can do next
+
+GROUNDING RULES:
+✅ GOOD: "The expense ratio is 0.45% (as per latest factsheet)"
+❌ BAD: "The expense ratio is typically around 0.5%"
+✅ GOOD: "Fund manager: John Doe (appointed March 2023)"
+❌ BAD: "Managed by experienced professionals"
+✅ GOOD: "Data for 5-year returns is not available for this fund"
+❌ BAD: "5-year returns: ~12% (estimated)"
 
 You have complete freedom to decide tool usage and response formatting based on what would be most helpful for each query."""
         

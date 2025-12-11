@@ -25,7 +25,6 @@ from langchain_openai import ChatOpenAI
 def get_chat_llm(model_name: Optional[str] = None, temperature: float = 0.0) -> ChatOpenAI:
     """
     Returns a ChatOpenAI model configured to use your Groq (Moonshot) endpoint.
-    Note: LangChain will read OPENAI_API_BASE and OPENAI_API_KEY env vars.
     
     Args:
         model_name: Model name to use (defaults to MOONSHOT_MODEL from env)
@@ -35,12 +34,19 @@ def get_chat_llm(model_name: Optional[str] = None, temperature: float = 0.0) -> 
         Configured ChatOpenAI instance
     """
     model = model_name or os.getenv("MOONSHOT_MODEL") or "moonshotai/kimi-k2-instruct"
+    base_url = os.getenv("MOONSHOT_BASE_URL") or "https://api.groq.com/openai/v1"
+    api_key = os.getenv("MOONSHOT_API_KEY")
+    
+    if not api_key:
+        raise ValueError("MOONSHOT_API_KEY not found in environment variables")
     
     try:
         llm = ChatOpenAI(
-            model=model, 
+            model=model,
             temperature=temperature,
-            max_tokens=1500
+            max_tokens=1500,
+            base_url=base_url,
+            api_key=api_key
         )
         logging.info(f"Moonshot LLM initialized successfully with model: {model}")
         return llm

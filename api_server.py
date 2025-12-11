@@ -22,6 +22,7 @@ from agent.core import MutualFundsAgent
 from agent.config import AgentConfig
 from main import MutualFundsInterface, UserSession, InteractionMode
 from utils.logger import setup_logger
+from evaluation.pipeline import EvaluationPipeline
 
 # Setup logging
 logger = setup_logger(__name__)
@@ -47,6 +48,7 @@ app.add_middleware(
 # Global instances
 config = AgentConfig.from_env()
 interface = MutualFundsInterface(config)
+evaluation_pipeline = EvaluationPipeline(config)  # Initialize evaluation pipeline
 
 # Active sessions storage
 active_sessions: Dict[str, UserSession] = {}
@@ -142,6 +144,8 @@ async def create_session(request: SessionRequest):
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(message: ChatMessage):
     """Process chat message and return AI response"""
+    start_time = datetime.now()
+    
     try:
         session_id = message.session_id
         
@@ -162,6 +166,74 @@ async def chat(message: ChatMessage):
             # Pure agentic approach - no templates, no hardcoded responses
             # The agent autonomously decides tool usage and synthesizes responses
             response = await interface.process_user_input(message.message)
+            
+            # Calculate latency
+            end_time = datetime.now()
+            total_latency_ms = int((end_time - start_time).total_seconds() * 1000)
+            
+            # Log evaluation to database (async, non-blocking)
+            try:
+                # Get intent classification from agent
+                from agent.intent_parser import IntentParser
+                intent_parser = IntentParser(config)
+                intent_result = await intent_parser.parse(message.message)
+                
+                # Prepare evaluation data
+                intent_data = {
+                    'intent': intent_result.intent.value,
+                    'confidence': intent_result.confidence,
+                    'entities': {
+                        'fund_name': intent_result.entities.fund_name,
+                        'metric': intent_result.entities.metric,
+                        'period': intent_result.entities.period
+                    }
+                }
+                
+                latency_data = {
+                    'total_ms': total_latency_ms,
+                    'llm_ms': int(total_latency_ms * 0.6),  # Estimate
+                    'tool_ms': int(total_latency_ms * 0.3),  # Estimate
+                    'api_ms': int(total_latency_ms * 0.1)   # Estimate
+                }
+                
+                # Get conversation turn count
+                turn_count = 1
+                if session_id in active_sessions and hasattr(active_sessions[session_id], 'history'):
+                    turn_count = len(active_sessions[session_id].history)
+                
+                # Extract tools used and retrieval context from agent
+                tools_used = []
+                retrieval_context = []
+                if hasattr(interface.agent, 'last_tools_used'):
+                    tools_used = interface.agent.last_tools_used
+                if hasattr(interface.agent, 'last_retrieval_context'):
+                    retrieval_context = interface.agent.last_retrieval_context
+                
+                metadata = {
+                    'user_id': message.user_name or 'anonymous',
+                    'conversation_turn': turn_count,
+                    'tools_used': tools_used,
+                    'source': 'live_chat'
+                }
+                
+                # Log evaluation (runs in background)
+                evaluation_pipeline.evaluate_interaction(
+                    user_prompt=message.message,
+                    agent_response=response,
+                    session_id=session_id,
+                    intent_data=intent_data,
+                    retrieval_context=retrieval_context,
+                    latency_data=latency_data,
+                    metadata=metadata,
+                    user_name=message.user_name or 'anonymous'
+                )
+                
+                logger.info(f"✅ Logged live chat evaluation for session {session_id} with {len(tools_used)} tools used")
+                
+            except Exception as eval_error:
+                # Don't fail the request if evaluation logging fails
+                logger.warning(f"Failed to log evaluation: {str(eval_error)}")
+            
         except Exception as e:
             # Show exact error details to frontend
             logger.error(f"Agent processing error: {str(e)}")

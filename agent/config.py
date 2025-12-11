@@ -35,6 +35,19 @@ class AgentConfig:
     # Intent detection settings
     INTENT_CONFIDENCE_THRESHOLD: float = 0.7
     
+    # Database Configuration (Evaluation Pipeline)
+    DB_HOST: str = os.getenv("DB_HOST", "localhost")
+    DB_PORT: int = int(os.getenv("DB_PORT", "5432"))
+    DB_NAME: str = os.getenv("DB_NAME", "mf_agent_eval")
+    DB_USER: str = os.getenv("DB_USER", "mf_agent")
+    DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
+    
+    # Evaluation Settings
+    ENABLE_DEEPEVAL: bool = os.getenv("ENABLE_DEEPEVAL", "true").lower() == "true"
+    AUTO_EVALUATE: bool = os.getenv("AUTO_EVALUATE", "true").lower() == "true"
+    AGENT_VERSION: str = os.getenv("AGENT_VERSION", "1.0.0")
+    environment: str = os.getenv("ENVIRONMENT", "development")
+    
     def __post_init__(self):
         if not hasattr(self, "PREFERRED_DOMAINS") or self.PREFERRED_DOMAINS is None:
             self.PREFERRED_DOMAINS = [
